@@ -42,6 +42,8 @@
 #include <linux/rcupdate.h>
 #include <linux/profile.h>
 #include <linux/notifier.h>
+#include <linux/freezer.h>
+
 
 #define CREATE_TRACE_POINTS
 #include "trace/lowmemorykiller.h"
@@ -62,6 +64,10 @@ static int lowmem_minfree[6] = {
 };
 static int lowmem_minfree_size = 4;
 
+/* User knob to enable/disable oom reaping feature */
+static int oom_reaper;
+module_param_named(oom_reaper, oom_reaper, int, 0644);
+
 static unsigned long lowmem_deathpending_timeout;
 
 #define lowmem_print(level, x...)			\
@@ -77,6 +83,14 @@ static unsigned long lowmem_count(struct shrinker *s,
 		global_page_state(NR_ACTIVE_FILE) +
 		global_page_state(NR_INACTIVE_ANON) +
 		global_page_state(NR_INACTIVE_FILE);
+}
+
+static void mark_lmk_victim(struct task_struct *tsk)
+{
+	struct mm_struct *mm = tsk->mm;
+
+ 	if (!cmpxchg(&tsk->signal->oom_mm, NULL, mm))
+		atomic_inc(&tsk->signal->oom_mm->mm_count);
 }
 
 static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
@@ -175,7 +189,11 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 		 */
 		if (selected->mm)
 			mark_oom_victim(selected);
+		if (oom_reaper)
+			mark_lmk_victim(selected);
 		task_unlock(selected);
+		if (oom_reaper)
+			wake_oom_reaper(selected);
 		trace_lowmemory_kill(selected, cache_size, cache_limit, free);
 		lowmem_print(1, "Killing '%s' (%d), adj %hd,\n" \
 			        "   to free %ldkB on behalf of '%s' (%d) because\n" \
